@@ -23,7 +23,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(ui.New(st, ws), tea.WithAltScreen())
+	p := tea.NewProgram(
+		ui.New(st, ws),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "app: %v\n", err)
 		os.Exit(1)

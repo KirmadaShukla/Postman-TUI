@@ -25,6 +25,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		// Scroll the response body with the mouse wheel from anywhere
+		// (except while the env editor modal is open).
+		if m.showEnv {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown,
+			tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight:
+			var cmd tea.Cmd
+			m.respView, cmd = m.respView.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	}
 
 	return m.updateFocused(msg)
