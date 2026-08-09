@@ -93,9 +93,15 @@ func newEnvInput(val string, width int) textinput.Model {
 func (m *Model) blurAll() {
 	m.urlInput.Blur()
 	m.bodyInput.Blur()
+	m.nameInput.Blur()
+	m.blurAuthInputs()
 	for i := range m.headerKeys {
 		m.headerKeys[i].Blur()
 		m.headerVals[i].Blur()
+	}
+	for i := range m.paramKeys {
+		m.paramKeys[i].Blur()
+		m.paramVals[i].Blur()
 	}
 	for i := range m.envKeys {
 		m.envKeys[i].Blur()

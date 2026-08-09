@@ -62,6 +62,8 @@ func (s *Store) Load() (models.Workspace, error) {
 	}
 	if len(ws.Collections) == 0 {
 		ws = models.DefaultWorkspace()
+	} else {
+		models.MigrateWorkspace(&ws)
 	}
 	return ws, nil
 }

@@ -23,10 +23,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// No mouse capture so the terminal's native text selection / copy works.
+	// Scroll the response pane with tab → Response, then ↑/↓ / pgup/pgdown.
 	p := tea.NewProgram(
 		ui.New(st, ws),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "app: %v\n", err)

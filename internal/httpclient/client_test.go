@@ -1,6 +1,11 @@
 package httpclient
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"my-new-go/internal/models"
+)
 
 func TestSubstitute(t *testing.T) {
 	vars := map[string]string{
@@ -23,5 +28,16 @@ func TestLooksLikeJSON(t *testing.T) {
 	}
 	if looksLikeJSON("plain text") {
 		t.Fatal("plain text should not look like JSON")
+	}
+}
+
+func TestApplyQueryParams(t *testing.T) {
+	got := applyQueryParams("https://example.com/search?q=old", []models.Header{
+		{Key: "q", Value: "new", Enabled: true},
+		{Key: "page", Value: "2", Enabled: true},
+		{Key: "skip", Value: "x", Enabled: false},
+	}, nil)
+	if !strings.Contains(got, "q=new") || !strings.Contains(got, "page=2") || strings.Contains(got, "skip=") {
+		t.Fatalf("unexpected url: %s", got)
 	}
 }

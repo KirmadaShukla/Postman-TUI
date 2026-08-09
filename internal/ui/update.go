@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"my-new-go/internal/httpclient"
@@ -25,21 +26,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-
-	case tea.MouseMsg:
-		// Scroll the response body with the mouse wheel from anywhere
-		// (except while the env editor modal is open).
-		if m.showEnv {
-			return m, nil
-		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown,
-			tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight:
-			var cmd tea.Cmd
-			m.respView, cmd = m.respView.Update(msg)
-			return m, cmd
-		}
-		return m, nil
 	}
 
 	return m.updateFocused(msg)
@@ -58,6 +44,7 @@ func (m Model) handleSendDone(msg sendDoneMsg) (tea.Model, tea.Cmd) {
 		URL:          msg.result.ResolvedURL,
 		StatusCode:   msg.result.StatusCode,
 		DurationMS:   msg.result.Duration.Milliseconds(),
+		Headers:      msg.req.Headers,
 		RequestBody:  msg.req.Body,
 		ResponseBody: truncate(msg.result.Body, 4000),
 	}
@@ -79,10 +66,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if key == "q" && !m.showEnv && m.focus != focusURL && m.focus != focusHeaders && m.focus != focusBody {
+	if key == "q" && !m.showEnv && !m.showName &&
+		m.focus != focusURL && m.focus != focusAuth && m.focus != focusParams &&
+		m.focus != focusHeaders && m.focus != focusBody {
 		return m, tea.Quit
 	}
 
+	if m.showName {
+		return m.handleNameKey(msg)
+	}
 	if m.showEnv {
 		return m.handleEnvKey(msg)
 	}
@@ -102,6 +94,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newRequest()
 		return m, nil
 
+	case "ctrl+f":
+		m.openNewFolderPrompt()
+		return m, nil
+
 	case "ctrl+o":
 		m.newCollection()
 		return m, nil
@@ -111,7 +107,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+d":
-		m.deleteSelectedRequest()
+		m.deleteSelected()
 		return m, nil
 
 	case "ctrl+y":
@@ -131,35 +127,55 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "left":
+		if m.focus == focusSidebar {
+			m.expandCollapse(false)
+			return m, nil
+		}
 		if m.focus == focusMethod {
 			m.methodIdx = (m.methodIdx - 1 + len(methods)) % len(methods)
 			m.dirty = true
 			return m, nil
 		}
 
-	case "right", "l":
+	case "right":
+		if m.focus == focusSidebar {
+			m.expandCollapse(true)
+			return m, nil
+		}
 		if m.focus == focusMethod {
 			m.methodIdx = (m.methodIdx + 1) % len(methods)
 			m.dirty = true
 			return m, nil
 		}
 
-	case "1", "2":
+	case "l":
+		if m.focus == focusMethod {
+			m.methodIdx = (m.methodIdx + 1) % len(methods)
+			m.dirty = true
+			return m, nil
+		}
+
+	case "1", "2", "3", "4":
 		if m.focus == focusSidebar || m.focus == focusMethod || m.focus == focusResponse {
-			if key == "1" {
-				if m.focus == focusResponse {
+			if m.focus == focusResponse {
+				if key == "1" {
 					m.respTab = 0
 					m.refreshResponseView()
-				} else {
-					m.setFocus(focusHeaders)
-				}
-			} else {
-				if m.focus == focusResponse {
+				} else if key == "2" {
 					m.respTab = 1
 					m.refreshResponseView()
-				} else {
-					m.setFocus(focusBody)
 				}
+				return m, nil
+			}
+			switch key {
+			case "1":
+				m.setFocus(focusAuth)
+			case "2":
+				m.setFocus(focusParams)
+			case "3":
+				m.setFocus(focusHeaders)
+			case "4":
+				m.setFocus(focusBody)
 			}
 			return m, nil
 		}
@@ -178,28 +194,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "up", "k":
 		if m.focus == focusSidebar {
-			if m.selectedIdx > 0 {
-				m.applyEditorToSelected()
-				m.selectedIdx--
-				m.loadSelectedIntoEditor()
-			}
+			m.moveSidebar(-1)
 			return m, nil
 		}
 
 	case "down", "j":
 		if m.focus == focusSidebar {
-			col := m.activeCollection()
-			if col != nil && m.selectedIdx < len(col.Requests)-1 {
-				m.applyEditorToSelected()
-				m.selectedIdx++
-				m.loadSelectedIntoEditor()
-			}
+			m.moveSidebar(1)
+			return m, nil
+		}
+
+	case "r":
+		if m.focus == focusSidebar {
+			m.openRenamePrompt()
 			return m, nil
 		}
 
 	case "enter":
-		// Send from URL / method / sidebar. Headers/body keep Enter for editing.
-		if m.focus == focusSidebar || m.focus == focusMethod || m.focus == focusURL {
+		if m.focus == focusSidebar {
+			row, ok := m.cursorRow()
+			if !ok {
+				return m, nil
+			}
+			if row.kind == rowHistory {
+				m.restoreHistory(row.histIdx)
+				return m, nil
+			}
+			item := itemAtMut(m.activeCollection(), row.path)
+			if item != nil && item.Kind == models.ItemFolder {
+				m.toggleExpanded(item.ID)
+				return m, nil
+			}
+			if item != nil && item.Kind == models.ItemRequest {
+				m.selectedPath = copyPath(row.path)
+				return m.startSend()
+			}
+			return m, nil
+		}
+		// Send from URL / method. Headers/body keep Enter for editing.
+		if m.focus == focusMethod || m.focus == focusURL {
 			return m.startSend()
 		}
 
@@ -208,6 +241,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.respTab = 0
 			m.refreshResponseView()
 			m.setFocus(focusResponse)
+			return m, nil
+		}
+
+	case "y":
+		// Yank current response tab (body/headers) to the system clipboard.
+		if m.focus == focusResponse || m.focus == focusSidebar || m.focus == focusMethod {
+			text := formatResponseTab(m.resp, m.respTab)
+			if strings.TrimSpace(text) == "" || text == "Send a request to see the response body." || text == "Send a request to see headers." {
+				m.status = "nothing to copy"
+				return m, nil
+			}
+			if err := clipboard.WriteAll(text); err != nil {
+				m.status = "copy failed: " + err.Error()
+			} else {
+				m.status = "copied to clipboard"
+			}
 			return m, nil
 		}
 
@@ -233,61 +282,26 @@ func (m Model) updateFocused(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case focusURL:
 		m.urlInput, cmd = m.urlInput.Update(msg)
 		m.dirty = true
+	case focusAuth:
+		return m.updateAuth(msg)
+	case focusParams:
+		cmd = m.updateKV(msg, &m.paramKeys, &m.paramVals, &m.paramEn)
 	case focusBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
 		m.dirty = true
 	case focusHeaders:
-		cmd = m.updateHeaders(msg)
+		cmd = m.updateKV(msg, &m.headerKeys, &m.headerVals, &m.headerEn)
 	case focusResponse:
 		m.respView, cmd = m.respView.Update(msg)
 	}
 	return m, cmd
 }
 
-func (m *Model) updateHeaders(msg tea.Msg) tea.Cmd {
-	if len(m.headerKeys) == 0 {
-		return nil
-	}
-
-	var cmd tea.Cmd
-	idx := len(m.headerKeys) - 1
-	for i := range m.headerKeys {
-		if m.headerKeys[i].Focused() {
-			idx = i
-			break
-		}
-	}
-	if !m.headerKeys[idx].Focused() && !m.headerVals[idx].Focused() {
-		m.headerKeys[idx].Focus()
-	}
-	if m.headerKeys[idx].Focused() {
-		m.headerKeys[idx], cmd = m.headerKeys[idx].Update(msg)
-		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
-			m.headerKeys[idx].Blur()
-			m.headerVals[idx].Focus()
-		}
-	} else {
-		m.headerVals[idx], cmd = m.headerVals[idx].Update(msg)
-		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
-			m.headerVals[idx].Blur()
-			last := len(m.headerKeys) - 1
-			if strings.TrimSpace(m.headerKeys[last].Value()) != "" || strings.TrimSpace(m.headerVals[last].Value()) != "" {
-				m.headerKeys = append(m.headerKeys, newHeaderInput("", 20))
-				m.headerVals = append(m.headerVals, newHeaderInput("", 40))
-				m.headerEn = append(m.headerEn, true)
-			}
-			next := idx + 1
-			if next < len(m.headerKeys) {
-				m.headerKeys[next].Focus()
-			}
-		}
-	}
-	m.dirty = true
-	return cmd
-}
-
 func (m *Model) cycleFocus(dir int) {
-	order := []focusArea{focusSidebar, focusMethod, focusURL, focusHeaders, focusBody, focusResponse}
+	order := []focusArea{
+		focusSidebar, focusMethod, focusURL,
+		focusAuth, focusParams, focusHeaders, focusBody, focusResponse,
+	}
 	cur := 0
 	for i, f := range order {
 		if f == m.focus {
@@ -305,14 +319,23 @@ func (m *Model) setFocus(f focusArea) {
 	switch f {
 	case focusURL:
 		m.urlInput.Focus()
-	case focusBody:
-		m.reqTab = 1
-		m.bodyInput.Focus()
+	case focusAuth:
+		m.reqTab = reqTabAuth
+		m.authField = 0
+		m.focusAuthField()
+	case focusParams:
+		m.reqTab = reqTabParams
+		if len(m.paramKeys) > 0 {
+			m.paramKeys[0].Focus()
+		}
 	case focusHeaders:
-		m.reqTab = 0
+		m.reqTab = reqTabHeaders
 		if len(m.headerKeys) > 0 {
 			m.headerKeys[0].Focus()
 		}
+	case focusBody:
+		m.reqTab = reqTabBody
+		m.bodyInput.Focus()
 	}
 }
 

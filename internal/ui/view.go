@@ -5,11 +5,16 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"my-new-go/internal/models"
 )
 
 func (m Model) View() string {
 	if !m.ready {
 		return "loading..."
+	}
+	if m.showName {
+		return m.viewNameModal()
 	}
 	if m.showEnv {
 		return m.viewEnvModal()
@@ -41,14 +46,14 @@ func (m Model) View() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
 
 	helpBar := help(
-		[2]string{"enter", "send"},
+		[2]string{"enter", "send/open"},
 		[2]string{"tab", "focus"},
-		[2]string{"[/]", "collection"},
+		[2]string{"ctrl+f", "folder"},
+		[2]string{"r", "rename"},
+		[2]string{"ctrl+n", "req"},
+		[2]string{"y", "copy"},
 		[2]string{"ctrl+e", "env"},
-		[2]string{"ctrl+n", "new req"},
-		[2]string{"ctrl+o", "new col"},
-		[2]string{"ctrl+d", "del req"},
-		[2]string{"ctrl+y", "clear hist"},
+		[2]string{"ctrl+d", "del"},
 		[2]string{"q", "quit"},
 	)
 
@@ -80,47 +85,87 @@ func (m Model) viewSidebar() string {
 	}
 	b.WriteString(sectionLabel.Render(colTitle) + "\n")
 	if len(m.ws.Collections) > 1 {
-		b.WriteString(emptyHint.Render("[ ] switch  ctrl+o new") + "\n")
+		b.WriteString(emptyHint.Render("[ ] switch  ctrl+o new  ctrl+f folder") + "\n")
 	} else {
-		b.WriteString(emptyHint.Render("ctrl+o new collection") + "\n")
+		b.WriteString(emptyHint.Render("ctrl+o new · ctrl+f folder") + "\n")
 	}
-	if col == nil || len(col.Requests) == 0 {
-		b.WriteString(emptyHint.Render("empty — ctrl+n to add") + "\n")
-	} else {
-		for i, req := range col.Requests {
-			method := req.Method
-			prefix := "  "
-			ms := methodStyle(method)
-			badge := ms.Render(fmt.Sprintf("%-4s", method))
-			name := truncate(req.Name, innerW-9)
-			line := prefix + badge + " " + name
-			if i == m.selectedIdx {
-				line = "▸ " + badge + " " + name
-				pad := innerW - lipgloss.Width(line)
-				if pad > 0 {
-					line += strings.Repeat(" ", pad)
-				}
-				b.WriteString(listSel.Render(line) + "\n")
-			} else {
-				b.WriteString(listItem.Render(line) + "\n")
+
+	rows := m.sidebarRows()
+	treeCount := 0
+	for _, r := range rows {
+		if r.kind == rowTree {
+			treeCount++
+		}
+	}
+	if col == nil || treeCount == 0 {
+		b.WriteString(emptyHint.Render("empty — ctrl+n / ctrl+f") + "\n")
+	}
+
+	histStarted := false
+	for i, r := range rows {
+		if r.kind == rowHistory && !histStarted {
+			b.WriteString("\n" + sectionLabel.Render("◷ HISTORY") + "\n")
+			histStarted = true
+		}
+
+		cursor := "  "
+		if i == m.sidebarCursor {
+			cursor = "▸ "
+		}
+
+		var body string
+		switch r.kind {
+		case rowTree:
+			if col == nil {
+				continue
 			}
+			item := itemAt(col.Items, r.path)
+			if item == nil {
+				continue
+			}
+			indent := strings.Repeat("  ", r.depth)
+			if item.Kind == models.ItemFolder {
+				chev := "▸"
+				if m.isExpanded(item.ID) {
+					chev = "▾"
+				}
+				name := truncate(item.Name, max(4, innerW-6-r.depth*2))
+				body = indent + chev + " " + name
+			} else {
+				method := "GET"
+				name := item.Name
+				if item.Request != nil {
+					method = item.Request.Method
+					if name == "" {
+						name = item.Request.Name
+					}
+				}
+				badge := methodStyle(method).Render(fmt.Sprintf("%-4s", method))
+				name = truncate(name, max(4, innerW-9-r.depth*2))
+				body = indent + badge + " " + name
+			}
+		case rowHistory:
+			h := m.ws.History[r.histIdx]
+			code := statusChip(h.StatusCode, "").Render(fmt.Sprintf("%d", h.StatusCode))
+			method := labelStyle.Render(fmt.Sprintf("%-4s", h.Method))
+			body = method + code + " " + truncate(h.URL, max(4, innerW-14))
+		}
+
+		line := cursor + body
+		if i == m.sidebarCursor {
+			pad := innerW - lipgloss.Width(line)
+			if pad > 0 {
+				line += strings.Repeat(" ", pad)
+			}
+			b.WriteString(listSel.Render(line) + "\n")
+		} else {
+			b.WriteString(listItem.Render(line) + "\n")
 		}
 	}
 
-	b.WriteString("\n" + sectionLabel.Render("◷ HISTORY") + "\n")
 	if len(m.ws.History) == 0 {
+		b.WriteString("\n" + sectionLabel.Render("◷ HISTORY") + "\n")
 		b.WriteString(emptyHint.Render("no requests sent yet") + "\n")
-	}
-	limit := 8
-	if len(m.ws.History) < limit {
-		limit = len(m.ws.History)
-	}
-	for i := 0; i < limit; i++ {
-		h := m.ws.History[i]
-		code := statusChip(h.StatusCode, "").Render(fmt.Sprintf("%d", h.StatusCode))
-		method := labelStyle.Render(fmt.Sprintf("%-4s", h.Method))
-		line := method + code + " " + truncate(h.URL, innerW-14)
-		b.WriteString(listItem.Render(line) + "\n")
 	}
 
 	h := m.editorH + m.respH
@@ -142,36 +187,32 @@ func (m Model) viewEditor() string {
 	urlView := m.urlInput.View()
 	reqLine := lipgloss.JoinHorizontal(lipgloss.Center, methodBox, " ", urlView)
 
-	headersTab := tabIdle.Render(" Headers ")
-	bodyTab := tabIdle.Render(" Body ")
-	if m.reqTab == 0 {
-		headersTab = tabActive.Render(" Headers ")
-	} else {
-		bodyTab = tabActive.Render(" Body ")
+	tab := func(label string, id int) string {
+		if m.reqTab == id {
+			return tabActive.Render(" " + label + " ")
+		}
+		return tabIdle.Render(" " + label + " ")
 	}
-	tabs := headersTab + bodyTab
+	tabs := tab("Auth", reqTabAuth) + tab("Params", reqTabParams) +
+		tab("Headers", reqTabHeaders) + tab("Body", reqTabBody)
 
 	var content string
-	if m.reqTab == 0 {
-		var hb strings.Builder
-		hb.WriteString(labelStyle.Render("KEY"))
-		hb.WriteString(strings.Repeat(" ", 18))
-		hb.WriteString(labelStyle.Render("VALUE"))
-		hb.WriteString("\n")
-		for i := range m.headerKeys {
-			hb.WriteString(m.headerKeys[i].View())
-			hb.WriteString("  ")
-			hb.WriteString(m.headerVals[i].View())
-			hb.WriteString("\n")
-		}
-		content = hb.String()
-	} else {
+	switch m.reqTab {
+	case reqTabAuth:
+		content = m.viewAuthTab()
+	case reqTabParams:
+		content = viewKVTab(m.paramKeys, m.paramVals)
+	case reqTabHeaders:
+		content = viewKVTab(m.headerKeys, m.headerVals)
+	default:
 		content = m.bodyInput.View()
 	}
 
 	inner := lipgloss.JoinVertical(lipgloss.Left, reqLine, "", tabs, content)
 	style := panelStyle.Width(m.mainW).Height(m.editorH)
-	if m.focus == focusMethod || m.focus == focusURL || m.focus == focusHeaders || m.focus == focusBody {
+	if m.focus == focusMethod || m.focus == focusURL ||
+		m.focus == focusAuth || m.focus == focusParams ||
+		m.focus == focusHeaders || m.focus == focusBody {
 		style = focusedPanel.Width(m.mainW).Height(m.editorH)
 	}
 	return style.Render(inner)
