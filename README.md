@@ -169,4 +169,4 @@ go build -o apitui .
 
 ## License
 
-See repository license (if applicable).
+[MIT](LICENSE)
